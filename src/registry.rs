@@ -65,7 +65,7 @@ impl Registry {
         Ok(())
     }
 
-    pub fn read(&self, file_name: &str) -> anyhow::Result<impl AsRef<[u8]>> {
+    pub fn read(&self, file_name: &str) -> anyhow::Result<Vec<u8>> {
         let path = Path::new(&self.root).join(file_name);
         let bytes = std::fs::read(path)?;
         Ok(bytes)

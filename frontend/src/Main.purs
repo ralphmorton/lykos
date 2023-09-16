@@ -4,7 +4,8 @@ import Prelude
 
 import Control.Monad.Error.Class (throwError, try)
 import Control.Promise (Promise, toAffE)
-import Data.Argonaut (class DecodeJson, class EncodeJson)
+import Data.Argonaut (class DecodeJson, class EncodeJson, decodeJson, encodeJson)
+import Data.Argonaut.Decode.Error (JsonDecodeError(..))
 import Data.Argonaut.Encode (toJsonString)
 import Data.Array (cons, uncons)
 import Data.Either (Either(..), either)
@@ -75,35 +76,96 @@ renderExecutionState { command, output } = case command of
     ]
   Right cmd ->
     el "div" ["class" := "card shadow mt-3"] [
-      el "div" ["class" := "card-header"] [
-        case cmd of
-          Ls ->
-            el "span" [] [text "ls"]
-          Rm package ->
-            el "span" [] [
-              text "rm ",
-              el "strong" [] [text package]
-            ]
-          Install package ->
-            el "span" [] [
-              text "install ",
-              el "strong" [] [text package]
-            ]
-      ],
+      el "div" ["class" := "card-header"] [renderCommand cmd],
       el "div" ["class" := "card-body"] [
         case output of
           Nothing ->
             el "span" [] [text "..."]
-          Just (Err e) ->
-            el "span" ["class" := "text-danger"] [text $ message e]
-          Just (Packages px) ->
-            el "div" [] $ px <#> \pkg ->
-              el "div" [] [text pkg]
-          Just (Removed package) ->
-            el "span" [] [text $ "Removed " <> package]
-          Just (Installed package) ->
-            el "span" [] [text $ "Installed " <> package]
+          Just o ->
+            renderOutput o
       ]
+    ]
+
+renderCommand :: Command -> Html
+renderCommand = case _ of
+  Ls ->
+    el "span" [] [text "ls"]
+  Rm package ->
+    el "span" [] [
+      text "rm ",
+      el "strong" [] [text package]
+    ]
+  Install package ->
+    el "span" [] [
+      text "install ",
+      el "strong" [] [text package]
+    ]
+  Ps ->
+    el "span" [] [text "ps"]
+  Launch package ->
+    el "span" [] [
+      text "launch ",
+      el "strong" [] [text package]
+    ]
+  Kill id ->
+    el "span" [] [
+      text "kill ",
+      el "strong" [] [text id]
+    ]
+
+renderOutput :: Output -> Html
+renderOutput = case _ of
+  Err e ->
+    el "span" ["class" := "text-danger"] [text $ message e]
+  Packages px ->
+    el "table" ["class" := "table"] [
+      el "thead" [] [
+        el "tr" [] [
+          el "th" [] [text "Package"]
+        ]
+      ],
+      el "tbody" [] $
+        px <#> \p ->
+          el "tr" [] [
+            el "td" [] [text p]
+          ]
+    ]
+  Removed package ->
+    el "span" [] [
+      text "Removed ",
+      el "strong" [] [text package]
+    ]
+  Installed package ->
+    el "span" [] [
+      text "Installed ",
+      el "strong" [] [text package]
+    ]
+  Instances instances ->
+    el "table" ["class" := "table"] [
+      el "thead" [] [
+        el "tr" [] [
+          el "th" [] [text "ID"],
+          el "th" [] [text "Package"],
+          el "th" [] [text "State"]
+        ]
+      ],
+      el "tbody" [] $
+        instances <#> \{ id, package, state } ->
+          el "tr" [] [
+            el "td" [] [text id],
+            el "td" [] [text package],
+            el "td" [] [text $ show state]
+          ]
+    ]
+  Launched id ->
+    el "span" [] [
+      text "Launched ",
+      el "strong" [] [text id]
+    ]
+  Killed id ->
+    el "span" [] [
+      text "Killed ",
+      el "strong" [] [text id]
     ]
 
 --
@@ -114,12 +176,46 @@ data Command
   = Ls
   | Rm String
   | Install String
+  | Ps
+  | Launch String
+  | Kill String
 
 data Output
   = Err Error
   | Packages (Array String)
   | Removed String
   | Installed String
+  | Instances (Array InstanceInfo)
+  | Launched String
+  | Killed String
+
+type InstanceInfo = {
+  id :: String,
+  package :: String,
+  state :: InstanceState
+}
+
+data InstanceState
+  = Running
+  | Terminated
+
+instance Show InstanceState where
+  show = case _ of
+    Running ->
+      "Running"
+    Terminated ->
+      "Terminated"
+
+instance DecodeJson InstanceState where
+  decodeJson j = do
+    s <- decodeJson j
+    case s of
+      "Running" ->
+        pure Running
+      "Terminated" ->
+        pure Terminated
+      _ ->
+        Left $ UnexpectedValue (encodeJson s)
 
 type ExecutionState = {
   id :: Int,
@@ -156,6 +252,12 @@ parseCommand input = case split (wrap " ") (trim input) of
     pure (Rm package)
   ["install", package] ->
     pure (Install package)
+  ["ps"] ->
+    pure Ps
+  ["launch", package] ->
+    pure (Launch package)
+  ["kill", id] ->
+    pure (Kill id)
   _ ->
     Nothing
 
@@ -170,6 +272,13 @@ runCommand cmd = map (either Err identity) $ try $ case cmd of
     base64 <- pickFile
     install package base64
     pure (Installed package)
+  Ps ->
+    Instances <$> ps
+  Launch package ->
+    Launched <$> launch package
+  Kill id -> do
+    kill id
+    pure (Killed id)
 
 pickFile :: Aff String
 pickFile = toAffE pickFile_
@@ -188,6 +297,15 @@ rm = rpc "/rm" <<< { package: _ }
 
 install :: String -> String -> Aff Unit
 install name base64 = rpc "/install" { name, base64 }
+
+ps :: Aff (Array InstanceInfo)
+ps = rpc "/ps" unit
+
+launch :: String -> Aff String
+launch = rpc "/launch" <<< { package: _ }
+
+kill :: String -> Aff Unit
+kill = rpc "/kill" <<< { id: _ }
 
 rpc :: forall a b. EncodeJson a => DecodeJson b => String -> a -> Aff b
 rpc path body = do

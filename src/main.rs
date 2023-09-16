@@ -7,6 +7,7 @@ use base64::Engine;
 use clap::Parser;
 use lykos::error::AppError;
 use lykos::registry::{Package, Registry};
+use lykos::runtime::{InstanceInfo, Runtime};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use tower::ServiceExt;
@@ -20,7 +21,8 @@ struct Args {
 
 #[derive(Clone)]
 struct AppState {
-    registry: Arc<RwLock<Registry>>
+    registry: Arc<RwLock<Registry>>,
+    runtime: Arc<RwLock<Runtime>>
 }
 
 #[tokio::main]
@@ -28,8 +30,10 @@ async fn main() {
     let args = Args::parse();
 
     let registry = Registry::new(&args.root).expect("couldnt instantiate registry");
+    let runtime = Runtime::new();
     let state = AppState {
-        registry: Arc::new(RwLock::new(registry))
+        registry: Arc::new(RwLock::new(registry)),
+        runtime: Arc::new(RwLock::new(runtime))
     };
 
     let spa = ServeDir::new("static")
@@ -39,6 +43,9 @@ async fn main() {
         .route("/ls", post(ls))
         .route("/rm", post(rm))
         .route("/install", post(install))
+        .route("/ps", post(ps))
+        .route("/launch", post(launch))
+        .route("/kill", post(kill))
         .nest_service(
             "/assets",
             get(move |request: Request<Body>| async {
@@ -93,6 +100,40 @@ async fn install(State(state): State<AppState>, Json(install): Json<Install>) ->
     let mut registry = state.registry.write().unwrap();
 
     registry.install(&install.name, bytes)?;
+
+    Ok(Json(()))
+}
+
+async fn ps(State(state): State<AppState>) -> Result<Json<Vec<InstanceInfo>>, AppError> {
+    let runtime = state.runtime.read().unwrap();
+
+    let instances = runtime.ps();
+    Ok(Json(instances))
+}
+
+#[derive(Deserialize, Serialize)]
+struct Launch {
+    package: String
+}
+
+async fn launch(State(state): State<AppState>, Json(launch): Json<Launch>) -> Result<Json<String>, AppError> {
+    let registry = state.registry.read().unwrap();
+    let mut runtime = state.runtime.write().unwrap();
+
+    let bytecode = registry.read(launch.package.as_str())?;
+    let id = runtime.launch(launch.package.as_str(), bytecode);
+
+    Ok(Json(id.to_string()))
+}
+
+#[derive(Deserialize, Serialize)]
+struct Kill {
+    id: String
+}
+
+async fn kill (State(state): State<AppState>, Json(kill): Json<Kill>) -> Result<Json<()>, AppError> {
+    let runtime = state.runtime.read().unwrap();
+    runtime.kill(kill.id.as_str());
 
     Ok(Json(()))
 }
