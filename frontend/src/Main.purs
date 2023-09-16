@@ -11,7 +11,7 @@ import Data.Array (cons, uncons)
 import Data.Either (Either(..), either)
 import Data.Foldable (traverse_)
 import Data.HTTP.Method (Method(..))
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Newtype (wrap)
 import Data.String (split, trim)
 import Data.Tuple.Nested ((/\))
@@ -112,6 +112,11 @@ renderCommand = case _ of
       text "kill ",
       el "strong" [] [text id]
     ]
+  Res id ->
+    el "span" [] [
+      text "res ",
+      el "strong" [] [text id]
+    ]
 
 renderOutput :: Output -> Html
 renderOutput = case _ of
@@ -167,6 +172,10 @@ renderOutput = case _ of
       text "Killed ",
       el "strong" [] [text id]
     ]
+  Output output ->
+    el "span" [] [
+      el "strong" [] [text $ fromMaybe "-" output]
+    ]
 
 --
 --
@@ -179,6 +188,7 @@ data Command
   | Ps
   | Launch String
   | Kill String
+  | Res String
 
 data Output
   = Err Error
@@ -188,6 +198,7 @@ data Output
   | Instances (Array InstanceInfo)
   | Launched String
   | Killed String
+  | Output (Maybe String)
 
 type InstanceInfo = {
   id :: String,
@@ -258,6 +269,8 @@ parseCommand input = case split (wrap " ") (trim input) of
     pure (Launch package)
   ["kill", id] ->
     pure (Kill id)
+  ["res", id] ->
+    pure (Res id)
   _ ->
     Nothing
 
@@ -279,6 +292,8 @@ runCommand cmd = map (either Err identity) $ try $ case cmd of
   Kill id -> do
     kill id
     pure (Killed id)
+  Res id ->
+    Output <$> res id
 
 pickFile :: Aff String
 pickFile = toAffE pickFile_
@@ -306,6 +321,9 @@ launch = rpc "/launch" <<< { package: _ }
 
 kill :: String -> Aff Unit
 kill = rpc "/kill" <<< { id: _ }
+
+res :: String -> Aff (Maybe String)
+res = rpc "/res" <<< { id: _ }
 
 rpc :: forall a b. EncodeJson a => DecodeJson b => String -> a -> Aff b
 rpc path body = do

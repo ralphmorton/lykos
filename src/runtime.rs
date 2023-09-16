@@ -1,11 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use wasmer::{Module, Store};
-use wasmer_wasix::{LocalNetworking, WasiEnv};
-use wasmer_wasix::runtime::PluggableRuntime;
-use wasmer_wasix::runtime::task_manager::tokio::{RuntimeOrHandle, TokioTaskManager};
+use wasi_common::pipe::WritePipe;
+use wasmtime::{Engine, Linker, Module, Store};
+use wasmtime_wasi::sync::WasiCtxBuilder;
 
 #[derive(Debug)]
 pub struct Runtime {
@@ -16,7 +15,8 @@ pub struct Runtime {
 struct Instance {
     id: Uuid,
     package: String,
-    task: JoinHandle<anyhow::Result<()>>
+    task: JoinHandle<()>,
+    output: Arc<RwLock<Option<String>>>
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -46,15 +46,41 @@ impl Runtime {
             .collect()
     }
 
+    pub fn res(&mut self, id: &str) -> Option<String> {
+        let instance = self.instances
+            .iter()
+            .find(|i| i.id.to_string() == id);
+
+        instance.and_then(|i| {
+            let output = i.output.read().unwrap();
+            output.clone()
+        })
+    }
+
     pub fn launch(&mut self, package: &str, bytecode: Vec<u8>) -> Uuid {
         let id = Uuid::new_v4();
         let package = package.to_string();
-        let task = tokio::spawn(Self::run(package.clone(), bytecode));
+
+        let output = Arc::new(RwLock::new(None));
+
+        let task_output = output.clone();
+        let task = tokio::spawn(async move {
+            let result = Self::run(bytecode).await;
+
+            let output_str = match result {
+                Err(e) => format!("{:?}", e),
+                Ok(out) => out
+            };
+
+            let mut output = task_output.write().unwrap();
+            *output = Some(output_str);
+        });
 
         let instance = Instance {
             id,
             package,
-            task
+            task,
+            output
         };
 
         self.instances.push(instance);
@@ -63,25 +89,36 @@ impl Runtime {
     }
 
     pub fn kill(&self, id: &str) {
-        self.instances
-            .iter()
-            .find(|i| i.id.to_string() == id)
-            .map(|i| i.task.abort());
+        // TODO
     }
 
-    async fn run(package: String, bytecode: Vec<u8>) -> anyhow::Result<()> {
-        let store = Store::default();
-        let module = Module::new(&store, &bytecode)?;
+    async fn run(bytecode: Vec<u8>) -> anyhow::Result<String> {
+        let engine = Engine::default();
+        let mut linker = Linker::new(&engine);
 
-        let tokio_handle = RuntimeOrHandle::Handle(tokio::runtime::Handle::current());
-        let mut runtime = PluggableRuntime::new(Arc::new(TokioTaskManager::new(tokio_handle)));
-        runtime.set_networking_implementation(LocalNetworking::default());
+        wasmtime_wasi::add_to_linker(&mut linker, |s| s)?;
 
-        WasiEnv::builder(&package)
-            .runtime(Arc::new(runtime))
-            .run_with_store_async(module, store)?;
+        let stdout = WritePipe::new_in_memory();
 
-        Ok(())
+        {
+            let wasi = WasiCtxBuilder::new()
+                .stdout(Box::new(stdout.clone()))
+                .build();
+
+            let mut store = Store::new(&engine, wasi);
+
+            let module = Module::new(&engine, bytecode)?;
+            linker.module(&mut store, "", &module)?;
+
+            linker
+                .get_default(&mut store, "")?
+                .typed::<(), ()>(&store)?
+                .call(&mut store, ())?;
+        }
+
+        let stdout_bytes : Vec<u8> = stdout.try_into_inner().unwrap().into_inner();
+        let stdout_str = std::str::from_utf8(&stdout_bytes).map(String::from)?;
+        Ok(stdout_str)
     }
 }
 

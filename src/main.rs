@@ -46,6 +46,7 @@ async fn main() {
         .route("/ps", post(ps))
         .route("/launch", post(launch))
         .route("/kill", post(kill))
+        .route("/res", post(res))
         .nest_service(
             "/assets",
             get(move |request: Request<Body>| async {
@@ -131,9 +132,21 @@ struct Kill {
     id: String
 }
 
-async fn kill (State(state): State<AppState>, Json(kill): Json<Kill>) -> Result<Json<()>, AppError> {
+async fn kill(State(state): State<AppState>, Json(kill): Json<Kill>) -> Result<Json<()>, AppError> {
     let runtime = state.runtime.read().unwrap();
     runtime.kill(kill.id.as_str());
 
     Ok(Json(()))
+}
+
+#[derive(Deserialize, Serialize)]
+struct Res {
+    id: String
+}
+
+async fn res(State(state): State<AppState>, Json(res): Json<Res>) -> Result<Json<Option<String>>, AppError> {
+    let mut runtime = state.runtime.write().unwrap();
+    let result = runtime.res(res.id.as_str());
+
+    Ok(Json(result))
 }

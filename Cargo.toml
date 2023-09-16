@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.75"
-axum = "0.6.20"
+axum = { version = "0.6.20", features = ["macros"] }
 base64 = "0.21.4"
 clap = { version = "4.4.3", features = ["derive"] }
 serde = { version = "1.0.188", features = ["derive"] }
@@ -16,5 +16,6 @@ tokio = { version = "1.32.0", features = ["full"] }
 tower = { version = "0.4.13", features = ["full"] }
 tower-http = { version = "0.4.4", features = ["fs"] }
 uuid = { version = "1.4.1", features = ["v4"] }
-wasmer = "4.2.0"
-wasmer-wasix = "0.13.0"
+wasi-common = "12.0.2"
+wasmtime = "12.0.2"
+wasmtime-wasi = "12.0.2"
