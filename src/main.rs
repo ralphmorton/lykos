@@ -114,7 +114,8 @@ async fn ps(State(state): State<AppState>) -> Result<Json<Vec<InstanceInfo>>, Ap
 
 #[derive(Deserialize, Serialize)]
 struct Launch {
-    package: String
+    package: String,
+    args: Vec<String>
 }
 
 async fn launch(State(state): State<AppState>, Json(launch): Json<Launch>) -> Result<Json<String>, AppError> {
@@ -122,7 +123,7 @@ async fn launch(State(state): State<AppState>, Json(launch): Json<Launch>) -> Re
     let mut runtime = state.runtime.write().unwrap();
 
     let bytecode = registry.read(launch.package.as_str())?;
-    let id = runtime.launch(launch.package.as_str(), bytecode)?;
+    let id = runtime.launch(launch.package, launch.args, bytecode)?;
 
     Ok(Json(id.to_string()))
 }

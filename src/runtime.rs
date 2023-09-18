@@ -56,9 +56,8 @@ impl Runtime {
         })
     }
 
-    pub fn launch(&mut self, package: &str, bytecode: Vec<u8>) -> anyhow::Result<Uuid> {
+    pub fn launch(&mut self, package: String, args: Vec<String>, bytecode: Vec<u8>) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
-        let package = package.to_string();
 
         let engine = Engine::new(Config::new().epoch_interruption(true))?;
         let engine = Arc::new(engine);
@@ -67,7 +66,7 @@ impl Runtime {
         let task_engine = engine.clone();
         let task_output = output.clone();
         let task = tokio::spawn(async move {
-            let result = Self::run(task_engine, bytecode).await;
+            let result = Self::run(task_engine, args, bytecode).await;
 
             let output_str = match result {
                 Err(e) => format!("{:?}", e),
@@ -101,7 +100,8 @@ impl Runtime {
         }
     }
 
-    async fn run(engine: Arc<Engine>, bytecode: Vec<u8>) -> anyhow::Result<String> {
+    async fn run(engine: Arc<Engine>, args: Vec<String>, bytecode: Vec<u8>) -> anyhow::Result<String> {
+        let args = args;
         let mut linker = Linker::new(&engine);
 
         wasmtime_wasi::add_to_linker(&mut linker, |s| s)?;
@@ -110,6 +110,7 @@ impl Runtime {
 
         {
             let wasi = WasiCtxBuilder::new()
+                .args(&args)?
                 .stdout(Box::new(stdout.clone()))
                 .build();
 

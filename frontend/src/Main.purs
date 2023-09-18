@@ -7,13 +7,13 @@ import Control.Promise (Promise, toAffE)
 import Data.Argonaut (class DecodeJson, class EncodeJson, decodeJson, encodeJson)
 import Data.Argonaut.Decode.Error (JsonDecodeError(..))
 import Data.Argonaut.Encode (toJsonString)
-import Data.Array (cons, uncons)
+import Data.Array (cons, filter, uncons)
 import Data.Either (Either(..), either)
 import Data.Foldable (traverse_)
 import Data.HTTP.Method (Method(..))
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Newtype (wrap)
-import Data.String (split, trim)
+import Data.String (joinWith, split, trim)
 import Data.Tuple.Nested ((/\))
 import Effect (Effect)
 import Effect.Aff (Aff, launchAff_)
@@ -102,10 +102,10 @@ renderCommand = case _ of
     ]
   Ps ->
     el "span" [] [text "ps"]
-  Launch package ->
+  Launch package args ->
     el "span" [] [
       text "launch ",
-      el "strong" [] [text package]
+      el "strong" [] [text $ package <> joinWith " " args]
     ]
   Kill id ->
     el "span" [] [
@@ -186,7 +186,7 @@ data Command
   | Rm String
   | Install String
   | Ps
-  | Launch String
+  | Launch String (Array String)
   | Kill String
   | Res String
 
@@ -256,23 +256,26 @@ setOutput id output history = case uncons history of
     else cons head (setOutput id output tail)
 
 parseCommand :: String -> Maybe Command
-parseCommand input = case split (wrap " ") (trim input) of
-  ["ls"] ->
-    pure Ls
-  ["rm", package] ->
-    pure (Rm package)
-  ["install", package] ->
-    pure (Install package)
-  ["ps"] ->
-    pure Ps
-  ["launch", package] ->
-    pure (Launch package)
-  ["kill", id] ->
-    pure (Kill id)
-  ["res", id] ->
-    pure (Res id)
-  _ ->
-    Nothing
+parseCommand input = do
+  { head, tail } <- uncons $ filter (_ /= "") $ split (wrap " ") (trim input)
+  case head, tail of
+    "ls", [] ->
+      pure Ls
+    "rm", [package] ->
+      pure (Rm package)
+    "install", [package] ->
+      pure (Install package)
+    "ps", [] ->
+      pure Ps
+    "launch", rest -> do
+      r <- uncons rest
+      pure (Launch r.head r.tail)
+    "kill", [id] ->
+      pure (Kill id)
+    "res", [id] ->
+      pure (Res id)
+    _, _ ->
+      Nothing
 
 runCommand :: Command -> Aff Output
 runCommand cmd = map (either Err identity) $ try $ case cmd of
@@ -287,8 +290,8 @@ runCommand cmd = map (either Err identity) $ try $ case cmd of
     pure (Installed package)
   Ps ->
     Instances <$> ps
-  Launch package ->
-    Launched <$> launch package
+  Launch package args ->
+    Launched <$> launch package args
   Kill id -> do
     kill id
     pure (Killed id)
@@ -316,8 +319,8 @@ install name base64 = rpc "/install" { name, base64 }
 ps :: Aff (Array InstanceInfo)
 ps = rpc "/ps" unit
 
-launch :: String -> Aff String
-launch = rpc "/launch" <<< { package: _ }
+launch :: String -> Array String -> Aff String
+launch package args = rpc "/launch" { package, args }
 
 kill :: String -> Aff Unit
 kill = rpc "/kill" <<< { id: _ }
