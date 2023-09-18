@@ -122,7 +122,7 @@ async fn launch(State(state): State<AppState>, Json(launch): Json<Launch>) -> Re
     let mut runtime = state.runtime.write().unwrap();
 
     let bytecode = registry.read(launch.package.as_str())?;
-    let id = runtime.launch(launch.package.as_str(), bytecode);
+    let id = runtime.launch(launch.package.as_str(), bytecode)?;
 
     Ok(Json(id.to_string()))
 }

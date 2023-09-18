@@ -6,7 +6,7 @@ export const pickFile_ = async () => {
     const reader = new FileReader()
 
     reader.onloadend = (evt) => {
-      resolve(evt.target.result.replace('data:text/plain;base64,', ''))
+      resolve(evt.target.result.split(';base64,')[1])
     }
 
     reader.readAsDataURL(file)

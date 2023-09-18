@@ -3,18 +3,17 @@ use std::sync::{Arc, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 use wasi_common::pipe::WritePipe;
-use wasmtime::{Engine, Linker, Module, Store};
+use wasmtime::{Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::sync::WasiCtxBuilder;
 
-#[derive(Debug)]
 pub struct Runtime {
     instances: Vec<Instance>
 }
 
-#[derive(Debug)]
 struct Instance {
     id: Uuid,
     package: String,
+    engine: Arc<Engine>,
     task: JoinHandle<()>,
     output: Arc<RwLock<Option<String>>>
 }
@@ -57,15 +56,18 @@ impl Runtime {
         })
     }
 
-    pub fn launch(&mut self, package: &str, bytecode: Vec<u8>) -> Uuid {
+    pub fn launch(&mut self, package: &str, bytecode: Vec<u8>) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
         let package = package.to_string();
 
+        let engine = Engine::new(Config::new().epoch_interruption(true))?;
+        let engine = Arc::new(engine);
         let output = Arc::new(RwLock::new(None));
 
+        let task_engine = engine.clone();
         let task_output = output.clone();
         let task = tokio::spawn(async move {
-            let result = Self::run(bytecode).await;
+            let result = Self::run(task_engine, bytecode).await;
 
             let output_str = match result {
                 Err(e) => format!("{:?}", e),
@@ -79,21 +81,27 @@ impl Runtime {
         let instance = Instance {
             id,
             package,
+            engine,
             task,
             output
         };
 
         self.instances.push(instance);
 
-        id
+        Ok(id)
     }
 
     pub fn kill(&self, id: &str) {
-        // TODO
+        let instance = self.instances
+            .iter()
+            .find(|i| i.id.to_string() == id);
+
+        if let Some(instance) = instance {
+            instance.engine.increment_epoch();
+        }
     }
 
-    async fn run(bytecode: Vec<u8>) -> anyhow::Result<String> {
-        let engine = Engine::default();
+    async fn run(engine: Arc<Engine>, bytecode: Vec<u8>) -> anyhow::Result<String> {
         let mut linker = Linker::new(&engine);
 
         wasmtime_wasi::add_to_linker(&mut linker, |s| s)?;
@@ -106,6 +114,7 @@ impl Runtime {
                 .build();
 
             let mut store = Store::new(&engine, wasi);
+            store.set_epoch_deadline(1);
 
             let module = Module::new(&engine, bytecode)?;
             linker.module(&mut store, "", &module)?;
