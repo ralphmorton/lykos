@@ -98,7 +98,9 @@ struct Install {
 async fn install(State(state): State<AppState>, Json(install): Json<Install>) -> Result<Json<()>, AppError> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(&install.base64)?;
 
-    Runtime::check_wasm(bytes.clone())?;
+    if let Err(e) = Runtime::check_wasm(bytes.clone()) {
+        Err(anyhow::anyhow!("Invalid WASM bytecode provided: {:?}", e))?;
+    }
 
     let mut registry = state.registry.write().unwrap();
 
