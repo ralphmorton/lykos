@@ -100,6 +100,13 @@ impl Runtime {
         }
     }
 
+    pub fn check_wasm(bytecode: Vec<u8>) -> anyhow::Result<()> {
+        let engine = Engine::new(&Config::new())?;
+        let _ = Module::new(&engine, bytecode)?;
+
+        Ok(())
+    }
+
     async fn run(engine: Arc<Engine>, args: Vec<String>, bytecode: Vec<u8>) -> anyhow::Result<String> {
         let args = args;
         let mut linker = Linker::new(&engine);

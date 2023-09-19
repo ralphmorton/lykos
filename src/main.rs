@@ -98,6 +98,8 @@ struct Install {
 async fn install(State(state): State<AppState>, Json(install): Json<Install>) -> Result<Json<()>, AppError> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(&install.base64)?;
 
+    Runtime::check_wasm(bytes.clone())?;
+
     let mut registry = state.registry.write().unwrap();
 
     registry.install(&install.name, bytes)?;
