@@ -34,6 +34,10 @@ import Muon (
   state,
   (:=)
 )
+import Web.HTML (window)
+import Web.HTML.Location (host)
+import Web.HTML.Window (location)
+import WebSocket (WebSocket, websocket, onError, onMessage, send)
 
 main :: Effect Unit
 main = muon =<< app
@@ -117,6 +121,11 @@ renderCommand = case _ of
       text "res ",
       el "strong" [] [text id]
     ]
+  Attach package ->
+    el "span" [] [
+      text "attach ",
+      el "strong" [] [text package]
+    ]
 
 renderOutput :: Output -> Html
 renderOutput = case _ of
@@ -176,6 +185,39 @@ renderOutput = case _ of
     el "span" [] [
       el "strong" [] [text $ fromMaybe "-" output]
     ]
+  Attached state -> case state of
+    ConnectionFailed reason ->
+      el "span" ["class" := "text-danger"] [
+         text "Connection failed: ",
+          el "strong" [] [text reason]
+      ]
+    Connected props ->
+      el "div" [] [
+        el "textarea"
+          [
+            "rows" := "10",
+            "class" := "form-control w-100 mb-3",
+            "disabled" := "true"
+          ]
+          [text $ joinWith "\n" props.output],
+        el "input" [
+          "class" := "form-control w-100",
+          "type" := "text",
+          "value" := props.input,
+          on "input" (traverse_ props.setInput <<< eventTargetValue),
+          on "keydown" \evt -> when (eventKey evt == pure "Enter") do
+            send props.socket props.input
+            props.setInput ""
+        ] []
+      ]
+    Detached output ->
+      el "textarea mb-3"
+        [
+          "cols" := "5",
+          "class" := "form-control w-100",
+          "disabled" := "true"
+        ]
+        [text $ joinWith "\n" output]
 
 --
 --
@@ -189,6 +231,7 @@ data Command
   | Launch String (Array String)
   | Kill String
   | Res String
+  | Attach String
 
 data Output
   = Err Error
@@ -199,6 +242,7 @@ data Output
   | Launched String
   | Killed String
   | Output (Maybe String)
+  | Attached AttachmentState
 
 type InstanceInfo = {
   id :: String,
@@ -228,6 +272,18 @@ instance DecodeJson InstanceState where
       _ ->
         Left $ UnexpectedValue (encodeJson s)
 
+data AttachmentState
+  = ConnectionFailed String
+  | Connected AttachmentConnectedState
+  | Detached (Array String)
+
+type AttachmentConnectedState = {
+  socket :: WebSocket,
+  input :: String,
+  setInput :: String -> Effect Unit,
+  output :: Array String
+}
+
 type ExecutionState = {
   id :: Int,
   command :: Either String Command,
@@ -239,7 +295,7 @@ run id setHistory input = launchAff_ $ case parseCommand input of
   Just command -> do
     let st = { id, command: pure command, output: Nothing }
     liftEffect $ setHistory (_ <> [st])
-    output <- runCommand command
+    output <- runCommand id setHistory command
     liftEffect $ setHistory (setOutput id output)
       
   Nothing -> do
@@ -274,11 +330,13 @@ parseCommand input = do
       pure (Kill id)
     "res", [id] ->
       pure (Res id)
+    "attach", [package] ->
+      pure (Attach package)
     _, _ ->
       Nothing
 
-runCommand :: Command -> Aff Output
-runCommand cmd = map (either Err identity) $ try $ case cmd of
+runCommand :: Int -> ((Array ExecutionState -> Array ExecutionState) -> Effect Unit) -> Command -> Aff Output
+runCommand cmdId setHistory cmd = map (either Err identity) $ try $ case cmd of
   Ls ->
     Packages <$> ls
   Rm package -> do
@@ -297,11 +355,52 @@ runCommand cmd = map (either Err identity) $ try $ case cmd of
     pure (Killed id)
   Res id ->
     Output <$> res id
+  Attach package -> do
+    socket <- attach package (setHistory <<< pushAttachmentOutput cmdId) (setHistory <<< setOutput cmdId <<< Attached <<< ConnectionFailed)
+    pure $ Attached $ Connected {
+      socket,
+      input: "",
+      setInput: setHistory <<< setAttachmentInput cmdId,
+      output: []
+    }
 
 pickFile :: Aff String
 pickFile = toAffE pickFile_
 
 foreign import pickFile_ :: Effect (Promise String)
+
+pushAttachmentOutput :: Int -> String -> Array ExecutionState -> Array ExecutionState
+pushAttachmentOutput id output history = case uncons history of
+  Nothing ->
+    []
+  Just { head, tail } ->
+    if head.id == id
+    then
+      cons
+        (head { output = withAttachedConnected (\props -> props { output = props.output <> [output] }) <$> head.output })
+        tail
+    else
+      cons head (pushAttachmentOutput id output tail)
+
+setAttachmentInput :: Int -> String -> Array ExecutionState -> Array ExecutionState
+setAttachmentInput id input history = case uncons history of
+  Nothing ->
+    []
+  Just { head, tail } ->
+    if head.id == id
+    then
+      cons
+        (head { output = withAttachedConnected (_ { input = input }) <$> head.output })
+        tail
+    else
+      cons head (setAttachmentInput id input tail)
+
+withAttachedConnected :: (AttachmentConnectedState -> AttachmentConnectedState) -> Output -> Output
+withAttachedConnected f = case _ of
+  Attached (Connected props) ->
+    Attached (Connected $ f props)
+  o ->
+    o
 
 --
 --
@@ -344,3 +443,25 @@ rpc path body = do
   else do
     e <- text
     throwError (error e)
+
+--
+--
+--
+
+type AttachProps = {
+  setInput :: String -> Effect Unit,
+  pushOutput :: String -> Effect Unit,
+  onError :: String -> Effect Unit
+}
+
+attach :: String -> (String -> Effect Unit) -> (String -> Effect Unit) -> Aff WebSocket
+attach package pushOutput onErr = do
+  hostname <- liftEffect getHost
+  socket <- websocket $ "ws://" <> hostname <> "/attach/" <> package
+  liftEffect do
+    onError socket (onErr "Socket error")
+    onMessage socket pushOutput
+  pure socket
+
+getHost :: Effect String
+getHost = host =<< location =<< window

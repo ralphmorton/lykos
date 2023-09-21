@@ -1,7 +1,9 @@
 use axum::{Router, Server};
 use axum::body::Body;
-use axum::extract::{Json, State};
+use axum::extract::{Json, State, Path};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::Request;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use base64::Engine;
 use clap::Parser;
@@ -12,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::trace::TraceLayer;
 
 #[derive(Parser)]
 struct Args {
@@ -27,6 +30,8 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     let args = Args::parse();
 
     let registry = Registry::new(&args.root).expect("couldnt instantiate registry");
@@ -47,6 +52,7 @@ async fn main() {
         .route("/launch", post(launch))
         .route("/kill", post(kill))
         .route("/res", post(res))
+        .route("/attach/:package", get(attach))
         .nest_service(
             "/assets",
             get(move |request: Request<Body>| async {
@@ -54,6 +60,7 @@ async fn main() {
             })
         )
         .fallback_service(ServeFile::new("static/index.html"))
+        .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     Server::bind(&"0.0.0.0:3000".parse().unwrap())
@@ -154,4 +161,44 @@ async fn res(State(state): State<AppState>, Json(res): Json<Res>) -> Result<Json
     let result = runtime.res(res.id.as_str());
 
     Ok(Json(result))
+}
+
+async fn attach(State(state): State<AppState>, Path(package): Path<String>, socket: WebSocketUpgrade) -> impl IntoResponse {
+    socket.on_upgrade(move |socket| process_attached(state, package, socket))
+}
+
+async fn process_attached(state: AppState, package: String, mut socket: WebSocket) {
+    let span = tracing::span!(tracing::Level::DEBUG, "Processing attachment");
+    let _ = span.enter();
+
+    loop {
+        match socket.recv().await {
+            None => {
+                tracing::debug!("Socket connection closed");
+                break;
+            },
+            Some(Err(e)) => {
+                let log = format!("Socket error receiving data, terminating connection {:?}", e);
+                tracing::warn!(log);
+                break;
+            },
+            Some(Ok(msg)) => match msg {
+                Message::Close(_) => {
+                    tracing::debug!("Socket connection closed");
+                    break;
+                }
+                Message::Text(data) => {
+                    socket.send(Message::Text(data.clone())).await.unwrap();
+
+                    let response = format!("Got {}", data);
+                    socket.send(Message::Text(response)).await.unwrap();
+                },
+                _ => {
+                    let log = format!("Unsupported message received, terminating connection");
+                    tracing::error!(log);
+                    break;
+                }
+            }
+        }
+    }
 }
