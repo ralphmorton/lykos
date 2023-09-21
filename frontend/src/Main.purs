@@ -2,25 +2,24 @@ module Main where
 
 import Prelude
 
+import Command (Command(..), parseCommand, renderCommand)
 import Control.Monad.Error.Class (throwError, try)
 import Control.Monad.Fork.Class (fork)
 import Control.Monad.Rec.Class (forever)
 import Control.Promise (Promise, toAffE)
-import Data.Argonaut (class DecodeJson, class EncodeJson, decodeJson, encodeJson)
-import Data.Argonaut.Decode.Error (JsonDecodeError(..))
+import Data.Argonaut (class DecodeJson, class EncodeJson)
 import Data.Argonaut.Encode (toJsonString)
-import Data.Array (cons, filter, uncons)
+import Data.Array (cons, uncons)
 import Data.Either (Either(..), either)
 import Data.Foldable (traverse_)
 import Data.HTTP.Method (Method(..))
-import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Maybe (Maybe(..))
 import Data.Newtype (wrap)
-import Data.String (joinWith, split, trim)
 import Data.Tuple.Nested ((/\))
 import Effect (Effect)
 import Effect.Aff (Aff, delay, launchAff_)
 import Effect.Class (liftEffect)
-import Effect.Exception (Error, error, message)
+import Effect.Exception (error)
 import Fetch (fetch)
 import Fetch.Argonaut.Json (fromJson)
 import Muon (
@@ -36,6 +35,7 @@ import Muon (
   state,
   (:=)
 )
+import Output (AttachmentConnectedState, AttachmentState(..), InstanceInfo, Output(..), renderOutput)
 import Web.HTML (window)
 import Web.HTML.Location (host)
 import Web.HTML.Window (location)
@@ -92,203 +92,13 @@ renderExecutionState { command, output } = case command of
       ]
     ]
 
-renderCommand :: Command -> Html
-renderCommand = case _ of
-  Ls ->
-    el "span" [] [text "ls"]
-  Rm package ->
-    el "span" [] [
-      text "rm ",
-      el "strong" [] [text package]
-    ]
-  Install package ->
-    el "span" [] [
-      text "install ",
-      el "strong" [] [text package]
-    ]
-  Ps ->
-    el "span" [] [text "ps"]
-  Launch package args ->
-    el "span" [] [
-      text "launch ",
-      el "strong" [] [text $ package <> joinWith " " args]
-    ]
-  Kill id ->
-    el "span" [] [
-      text "kill ",
-      el "strong" [] [text id]
-    ]
-  Res id ->
-    el "span" [] [
-      text "res ",
-      el "strong" [] [text id]
-    ]
-  Attach package ->
-    el "span" [] [
-      text "attach ",
-      el "strong" [] [text package]
-    ]
-
-renderOutput :: Output -> Html
-renderOutput = case _ of
-  Err e ->
-    el "span" ["class" := "text-danger"] [text $ message e]
-  Packages px ->
-    el "table" ["class" := "table"] [
-      el "thead" [] [
-        el "tr" [] [
-          el "th" [] [text "Package"]
-        ]
-      ],
-      el "tbody" [] $
-        px <#> \p ->
-          el "tr" [] [
-            el "td" [] [text p]
-          ]
-    ]
-  Removed package ->
-    el "span" [] [
-      text "Removed ",
-      el "strong" [] [text package]
-    ]
-  Installed package ->
-    el "span" [] [
-      text "Installed ",
-      el "strong" [] [text package]
-    ]
-  Instances instances ->
-    el "table" ["class" := "table"] [
-      el "thead" [] [
-        el "tr" [] [
-          el "th" [] [text "ID"],
-          el "th" [] [text "Package"],
-          el "th" [] [text "State"]
-        ]
-      ],
-      el "tbody" [] $
-        instances <#> \{ id, package, state } ->
-          el "tr" [] [
-            el "td" [] [text id],
-            el "td" [] [text package],
-            el "td" [] [text $ show state]
-          ]
-    ]
-  Launched id ->
-    el "span" [] [
-      text "Launched ",
-      el "strong" [] [text id]
-    ]
-  Killed id ->
-    el "span" [] [
-      text "Killed ",
-      el "strong" [] [text id]
-    ]
-  Output output ->
-    el "textarea"
-      [
-        "rows" := "10",
-        "class" := "form-control w-100 mb-3",
-        "disabled" := "true"
-      ]
-      [text $ fromMaybe "-" output]
-  Attached state -> case state of
-    ConnectionFailed reason ->
-      el "span" ["class" := "text-danger"] [
-         text "Connection failed: ",
-          el "strong" [] [text reason]
-      ]
-    Connected props ->
-      el "div" [] [
-        el "textarea"
-          [
-            "rows" := "10",
-            "class" := "form-control w-100 mb-3",
-            "disabled" := "true"
-          ]
-          [text props.output],
-        el "input" [
-          "class" := "form-control w-100",
-          "type" := "text",
-          "value" := props.input,
-          on "input" (traverse_ props.setInput <<< eventTargetValue),
-          on "keydown" \evt -> when (eventKey evt == pure "Enter") do
-            send props.socket props.input
-            props.setInput ""
-        ] []
-      ]
-    Detached output ->
-      el "textarea mb-3"
-        [
-          "cols" := "5",
-          "class" := "form-control w-100",
-          "disabled" := "true"
-        ]
-        [text output]
-
 --
 --
 --
 
-data Command
-  = Ls
-  | Rm String
-  | Install String
-  | Ps
-  | Launch String (Array String)
-  | Kill String
-  | Res String
-  | Attach String
 
-data Output
-  = Err Error
-  | Packages (Array String)
-  | Removed String
-  | Installed String
-  | Instances (Array InstanceInfo)
-  | Launched String
-  | Killed String
-  | Output (Maybe String)
-  | Attached AttachmentState
 
-type InstanceInfo = {
-  id :: String,
-  package :: String,
-  state :: InstanceState
-}
 
-data InstanceState
-  = Running
-  | Terminated
-
-instance Show InstanceState where
-  show = case _ of
-    Running ->
-      "Running"
-    Terminated ->
-      "Terminated"
-
-instance DecodeJson InstanceState where
-  decodeJson j = do
-    s <- decodeJson j
-    case s of
-      "Running" ->
-        pure Running
-      "Terminated" ->
-        pure Terminated
-      _ ->
-        Left $ UnexpectedValue (encodeJson s)
-
-data AttachmentState
-  = ConnectionFailed String
-  | Connected AttachmentConnectedState
-  | Detached String
-
-type AttachmentConnectedState = {
-  socket :: WebSocket,
-  input :: String,
-  setInput :: String -> Effect Unit,
-  output :: String
-}
 
 type ExecutionState = {
   id :: Int,
@@ -316,30 +126,6 @@ setOutput id output history = case uncons history of
     if head.id == id
     then cons (head { output = pure output }) tail
     else cons head (setOutput id output tail)
-
-parseCommand :: String -> Maybe Command
-parseCommand input = do
-  { head, tail } <- uncons $ filter (_ /= "") $ split (wrap " ") (trim input)
-  case head, tail of
-    "ls", [] ->
-      pure Ls
-    "rm", [package] ->
-      pure (Rm package)
-    "install", [package] ->
-      pure (Install package)
-    "ps", [] ->
-      pure Ps
-    "launch", rest -> do
-      r <- uncons rest
-      pure (Launch r.head r.tail)
-    "kill", [id] ->
-      pure (Kill id)
-    "res", [id] ->
-      pure (Res id)
-    "attach", [package] ->
-      pure (Attach package)
-    _, _ ->
-      Nothing
 
 runCommand :: Int -> ((Array ExecutionState -> Array ExecutionState) -> Effect Unit) -> Command -> Aff Output
 runCommand cmdId setHistory cmd = map (either Err identity) $ try $ case cmd of
