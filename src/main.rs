@@ -214,7 +214,14 @@ async fn process_attached(
                     break;
                 }
                 Message::Text(data) => {
-                    if data != "" {
+                    if data == ":q" {
+                        let runtime = state.runtime.read().unwrap();
+                        runtime.kill(id.as_str());
+
+                        let _ = socket.close();
+
+                        break;
+                    } else if data != "" {
                         let echo = format!("> {}\n", data);
                         socket.send(Message::Text(echo)).await.unwrap();
 

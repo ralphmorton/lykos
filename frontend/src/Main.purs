@@ -17,7 +17,7 @@ import Data.Maybe (Maybe(..))
 import Data.Newtype (wrap)
 import Data.Tuple.Nested ((/\))
 import Effect (Effect)
-import Effect.Aff (Aff, delay, launchAff_)
+import Effect.Aff (Aff, Fiber, delay, launchAff_)
 import Effect.Class (liftEffect)
 import Effect.Exception (error)
 import Fetch (fetch)
@@ -148,12 +148,14 @@ runCommand cmdId setHistory cmd = map (either Err identity) $ try $ case cmd of
   Res id ->
     Output <$> res id
   Attach package -> do
-    socket <- attach package (setHistory <<< pushAttachmentOutput cmdId) (setHistory <<< setOutput cmdId <<< Attached <<< ConnectionFailed)
+    { socket, prodFiber } <- attach package (setHistory <<< pushAttachmentOutput cmdId) (setHistory <<< setOutput cmdId <<< Attached <<< ConnectionFailed)
     pure $ Attached $ Connected {
       socket,
       input: "",
       setInput: setHistory <<< setAttachmentInput cmdId,
-      output: ""
+      output: "",
+      exit: setHistory <<< setOutput cmdId <<< Attached <<< Detached,
+      prodFiber
     }
 
 pickFile :: Aff String
@@ -246,15 +248,15 @@ type AttachProps = {
   onError :: String -> Effect Unit
 }
 
-attach :: String -> (String -> Effect Unit) -> (String -> Effect Unit) -> Aff WebSocket
+attach :: String -> (String -> Effect Unit) -> (String -> Effect Unit) -> Aff { socket :: WebSocket, prodFiber :: Fiber Unit }
 attach package pushOutput onErr = do
   hostname <- liftEffect getHost
   socket <- websocket $ "ws://" <> hostname <> "/attach/" <> package
   liftEffect do
     onError socket (onErr "Socket error")
     onMessage socket pushOutput
-  void $ fork (prod socket)
-  pure socket
+  prodFiber <- fork (prod socket)
+  pure { socket, prodFiber }
 
 prod :: WebSocket -> Aff Unit
 prod socket = forever do

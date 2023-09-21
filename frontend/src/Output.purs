@@ -15,7 +15,8 @@ import Data.Either (Either(..))
 import Data.Foldable (traverse_)
 import Data.Maybe (Maybe, fromMaybe)
 import Effect (Effect)
-import Effect.Exception (Error, message)
+import Effect.Aff (Fiber, killFiber, launchAff_)
+import Effect.Exception (Error, error, message)
 import Muon (Html, el, eventKey, eventTargetValue, on, text, (:=))
 import WebSocket (WebSocket, send)
 
@@ -71,7 +72,9 @@ type AttachmentConnectedState = {
   socket :: WebSocket,
   input :: String,
   setInput :: String -> Effect Unit,
-  output :: String
+  output :: String,
+  exit :: String -> Effect Unit,
+  prodFiber :: Fiber Unit
 }
 
 --
@@ -163,12 +166,15 @@ renderOutput = case _ of
           on "keydown" \evt -> when (eventKey evt == pure "Enter") do
             send props.socket props.input
             props.setInput ""
+            when (props.input == ":q") do
+              launchAff_ $ killFiber (error "bye") props.prodFiber
+              props.exit props.output
         ] []
       ]
     Detached output ->
-      el "textarea mb-3"
+      el "textarea"
         [
-          "cols" := "5",
+          "rows" := "10",
           "class" := "form-control w-100",
           "disabled" := "true"
         ]
