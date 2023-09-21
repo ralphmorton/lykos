@@ -10,6 +10,7 @@ use clap::Parser;
 use lykos::error::AppError;
 use lykos::registry::{Package, Registry};
 use lykos::runtime::{InstanceInfo, Runtime};
+use lykos::stdio_forwarder::StdioForwarder;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use tower::ServiceExt;
@@ -134,7 +135,7 @@ async fn launch(State(state): State<AppState>, Json(launch): Json<Launch>) -> Re
     let mut runtime = state.runtime.write().unwrap();
 
     let bytecode = registry.read(launch.package.as_str())?;
-    let id = runtime.launch(launch.package, launch.args, bytecode)?;
+    let id = runtime.launch(launch.package, bytecode, launch.args)?;
 
     Ok(Json(id.to_string()))
 }
@@ -164,10 +165,35 @@ async fn res(State(state): State<AppState>, Json(res): Json<Res>) -> Result<Json
 }
 
 async fn attach(State(state): State<AppState>, Path(package): Path<String>, socket: WebSocketUpgrade) -> impl IntoResponse {
-    socket.on_upgrade(move |socket| process_attached(state, package, socket))
+    let state_copy = state.clone();
+    let registry = state_copy.registry.read().unwrap();
+    let mut runtime = state_copy.runtime.write().unwrap();
+
+    let bytecode = registry.read(package.as_str()).unwrap();
+
+    let stdin = Arc::new(RwLock::new(StdioForwarder::new()));
+    let stdout = Arc::new(RwLock::new(StdioForwarder::new()));
+
+    let id = runtime.attach(package, bytecode, stdin.clone(), stdout.clone()).unwrap();
+
+    socket.on_upgrade(move |socket| {
+        process_attached(
+            state,
+            socket,
+            id.to_string(),
+            stdin,
+            stdout
+        )
+    })
 }
 
-async fn process_attached(state: AppState, package: String, mut socket: WebSocket) {
+async fn process_attached(
+    state: AppState,
+    mut socket: WebSocket,
+    id: String,
+    stdin: Arc<RwLock<StdioForwarder>>,
+    stdout: Arc<RwLock<StdioForwarder>>
+) {
     let span = tracing::span!(tracing::Level::DEBUG, "Processing attachment");
     let _ = span.enter();
 
@@ -188,10 +214,16 @@ async fn process_attached(state: AppState, package: String, mut socket: WebSocke
                     break;
                 }
                 Message::Text(data) => {
-                    socket.send(Message::Text(data.clone())).await.unwrap();
+                    if data != "" {
+                        let echo = format!("> {}\n", data);
+                        socket.send(Message::Text(echo)).await.unwrap();
 
-                    let response = format!("Got {}", data);
-                    socket.send(Message::Text(response)).await.unwrap();
+                        let data = format!("{}\n", data);
+                        stdin.write().unwrap().push(data.as_bytes());
+                    }
+
+                    let available = String::from_utf8(stdout.write().unwrap().pull_all()).unwrap();
+                    socket.send(Message::Text(available)).await.unwrap();
                 },
                 _ => {
                     let log = format!("Unsupported message received, terminating connection");
@@ -201,4 +233,7 @@ async fn process_attached(state: AppState, package: String, mut socket: WebSocke
             }
         }
     }
+
+    let runtime = state.runtime.read().unwrap();
+    runtime.kill(id.as_str());
 }

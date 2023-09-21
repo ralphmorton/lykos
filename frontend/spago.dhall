@@ -30,6 +30,7 @@ to generate this file without the comments in this block.
   , "newtype"
   , "prelude"
   , "strings"
+  , "tailrec"
   , "transformers"
   , "tuples"
   , "web-html"

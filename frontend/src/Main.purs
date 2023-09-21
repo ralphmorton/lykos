@@ -3,6 +3,8 @@ module Main where
 import Prelude
 
 import Control.Monad.Error.Class (throwError, try)
+import Control.Monad.Fork.Class (fork)
+import Control.Monad.Rec.Class (forever)
 import Control.Promise (Promise, toAffE)
 import Data.Argonaut (class DecodeJson, class EncodeJson, decodeJson, encodeJson)
 import Data.Argonaut.Decode.Error (JsonDecodeError(..))
@@ -16,7 +18,7 @@ import Data.Newtype (wrap)
 import Data.String (joinWith, split, trim)
 import Data.Tuple.Nested ((/\))
 import Effect (Effect)
-import Effect.Aff (Aff, launchAff_)
+import Effect.Aff (Aff, delay, launchAff_)
 import Effect.Class (liftEffect)
 import Effect.Exception (Error, error, message)
 import Fetch (fetch)
@@ -182,9 +184,13 @@ renderOutput = case _ of
       el "strong" [] [text id]
     ]
   Output output ->
-    el "span" [] [
-      el "strong" [] [text $ fromMaybe "-" output]
-    ]
+    el "textarea"
+      [
+        "rows" := "10",
+        "class" := "form-control w-100 mb-3",
+        "disabled" := "true"
+      ]
+      [text $ fromMaybe "-" output]
   Attached state -> case state of
     ConnectionFailed reason ->
       el "span" ["class" := "text-danger"] [
@@ -199,7 +205,7 @@ renderOutput = case _ of
             "class" := "form-control w-100 mb-3",
             "disabled" := "true"
           ]
-          [text $ joinWith "\n" props.output],
+          [text props.output],
         el "input" [
           "class" := "form-control w-100",
           "type" := "text",
@@ -217,7 +223,7 @@ renderOutput = case _ of
           "class" := "form-control w-100",
           "disabled" := "true"
         ]
-        [text $ joinWith "\n" output]
+        [text output]
 
 --
 --
@@ -275,13 +281,13 @@ instance DecodeJson InstanceState where
 data AttachmentState
   = ConnectionFailed String
   | Connected AttachmentConnectedState
-  | Detached (Array String)
+  | Detached String
 
 type AttachmentConnectedState = {
   socket :: WebSocket,
   input :: String,
   setInput :: String -> Effect Unit,
-  output :: Array String
+  output :: String
 }
 
 type ExecutionState = {
@@ -361,7 +367,7 @@ runCommand cmdId setHistory cmd = map (either Err identity) $ try $ case cmd of
       socket,
       input: "",
       setInput: setHistory <<< setAttachmentInput cmdId,
-      output: []
+      output: ""
     }
 
 pickFile :: Aff String
@@ -377,7 +383,7 @@ pushAttachmentOutput id output history = case uncons history of
     if head.id == id
     then
       cons
-        (head { output = withAttachedConnected (\props -> props { output = props.output <> [output] }) <$> head.output })
+        (head { output = withAttachedConnected (\props -> props { output = props.output <> output }) <$> head.output })
         tail
     else
       cons head (pushAttachmentOutput id output tail)
@@ -461,7 +467,13 @@ attach package pushOutput onErr = do
   liftEffect do
     onError socket (onErr "Socket error")
     onMessage socket pushOutput
+  void $ fork (prod socket)
   pure socket
+
+prod :: WebSocket -> Aff Unit
+prod socket = forever do
+  delay (wrap 100.0)
+  liftEffect $ send socket ""
 
 getHost :: Effect String
 getHost = host =<< location =<< window

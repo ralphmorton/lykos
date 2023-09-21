@@ -1,8 +1,9 @@
+use crate::stdio_forwarder::StdioForwarder;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use wasi_common::pipe::WritePipe;
+use wasi_common::pipe::{WritePipe, ReadPipe};
 use wasmtime::{Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::sync::WasiCtxBuilder;
 
@@ -56,7 +57,7 @@ impl Runtime {
         })
     }
 
-    pub fn launch(&mut self, package: String, args: Vec<String>, bytecode: Vec<u8>) -> anyhow::Result<Uuid> {
+    pub fn launch(&mut self, package: String, bytecode: Vec<u8>, args: Vec<String>) -> anyhow::Result<Uuid> {
         let id = Uuid::new_v4();
 
         let engine = Engine::new(Config::new().epoch_interruption(true))?;
@@ -66,7 +67,7 @@ impl Runtime {
         let task_engine = engine.clone();
         let task_output = output.clone();
         let task = tokio::spawn(async move {
-            let result = Self::run(task_engine, args, bytecode).await;
+            let result = Self::run_launched(task_engine, bytecode, args).await;
 
             let output_str = match result {
                 Err(e) => format!("{:?}", e),
@@ -90,24 +91,7 @@ impl Runtime {
         Ok(id)
     }
 
-    pub fn kill(&self, id: &str) {
-        let instance = self.instances
-            .iter()
-            .find(|i| i.id.to_string() == id);
-
-        if let Some(instance) = instance {
-            instance.engine.increment_epoch();
-        }
-    }
-
-    pub fn check_wasm(bytecode: Vec<u8>) -> anyhow::Result<()> {
-        let engine = Engine::new(&Config::new())?;
-        let _ = Module::new(&engine, bytecode)?;
-
-        Ok(())
-    }
-
-    async fn run(engine: Arc<Engine>, args: Vec<String>, bytecode: Vec<u8>) -> anyhow::Result<String> {
+    async fn run_launched(engine: Arc<Engine>, bytecode: Vec<u8>, args: Vec<String>) -> anyhow::Result<String> {
         let args = args;
         let mut linker = Linker::new(&engine);
 
@@ -136,6 +120,95 @@ impl Runtime {
         let stdout_bytes : Vec<u8> = stdout.try_into_inner().unwrap().into_inner();
         let stdout_str = std::str::from_utf8(&stdout_bytes).map(String::from)?;
         Ok(stdout_str)
+    }
+
+    pub fn kill(&self, id: &str) {
+        let instance = self.instances
+            .iter()
+            .find(|i| i.id.to_string() == id);
+
+        if let Some(instance) = instance {
+            instance.engine.increment_epoch();
+        }
+    }
+
+    pub fn check_wasm(bytecode: Vec<u8>) -> anyhow::Result<()> {
+        let engine = Engine::new(&Config::new())?;
+        let _ = Module::new(&engine, bytecode)?;
+
+        Ok(())
+    }
+
+    pub fn attach(
+        &mut self,
+        package: String,
+        bytecode: Vec<u8>,
+        stdin: Arc<RwLock<StdioForwarder>>,
+        stdout: Arc<RwLock<StdioForwarder>>
+    ) -> anyhow::Result<Uuid> {
+        let id = Uuid::new_v4();
+
+        let engine = Engine::new(Config::new().epoch_interruption(true))?;
+        let engine = Arc::new(engine);
+        let output = Arc::new(RwLock::new(None));
+
+        let task_engine = engine.clone();
+        let task_output = output.clone();
+        let task = tokio::spawn(async move {
+            let result = Self::run_attached(task_engine, bytecode, stdin, stdout).await;
+
+            let output_str = match result {
+                Err(e) => format!("{:?}", e),
+                Ok(_) => "<exited>".to_string()
+            };
+
+            let mut output = task_output.write().unwrap();
+            *output = Some(output_str);
+        });
+
+        let instance = Instance {
+            id,
+            package,
+            engine,
+            task,
+            output
+        };
+
+        self.instances.push(instance);
+
+        Ok(id)
+    }
+
+    async fn run_attached(
+        engine: Arc<Engine>,
+        bytecode: Vec<u8>,
+        stdin: Arc<RwLock<StdioForwarder>>,
+        stdout: Arc<RwLock<StdioForwarder>>
+    ) -> anyhow::Result<()> {
+        let mut linker = Linker::new(&engine);
+
+        wasmtime_wasi::add_to_linker(&mut linker, |s| s)?;
+
+        let stdin = ReadPipe::from_shared(stdin);
+        let stdout = WritePipe::from_shared(stdout);
+
+        let wasi = WasiCtxBuilder::new()
+            .stdin(Box::new(stdin.clone()))
+            .stdout(Box::new(stdout.clone()))
+            .build();
+
+        let mut store = Store::new(&engine, wasi);
+        store.set_epoch_deadline(1);
+
+        let module = Module::new(&engine, bytecode)?;
+        linker.module(&mut store, "", &module)?;
+
+        linker
+            .get_default(&mut store, "")?
+            .typed::<(), ()>(&store)?
+            .call(&mut store, ())?;
+
+        Ok(())
     }
 }
 
